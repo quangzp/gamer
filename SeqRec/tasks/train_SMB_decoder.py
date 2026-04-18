@@ -1,0 +1,479 @@
+import torch
+from loguru import logger
+
+from SeqRec.tasks.multi_gpu import MultiGPUTask
+from SeqRec.datasets.SMB_dataset import BaseSMBDataset, SMBExplicitDatasetForDecoder, SMBFixedRatioDatasetForDecoder
+from SeqRec.datasets.loading_SMB import load_SMB_datasets
+from SeqRec.datasets.collator import EncoderDecoderCollator, DecoderOnlyCollator
+from SeqRec.utils.futils import ensure_dir
+from SeqRec.utils.parse import SubParsersAction, parse_global_args, parse_dataset_args
+from SeqRec.utils.logging import replace_progress_callback
+
+
+class TrainSMBDecoder(MultiGPUTask):
+    """
+    Train a SMB decoder for the SeqRec model.
+    """
+
+    @staticmethod
+    def parser_name() -> str:
+        return "train_SMB_decoder"
+
+    @staticmethod
+    def add_sub_parsers(sub_parsers: SubParsersAction):
+        """
+        Add subparsers for the TrainSMBDecoder task.
+        """
+        parser = sub_parsers.add_parser(
+            "train_SMB_decoder", help="Train a decoder for session-wise multi-behavior recommendation."
+        )
+        parser = parse_global_args(parser)
+        parser = parse_dataset_args(parser)
+        parser.add_argument(
+            "--optim", type=str, default="adamw_torch", help="The name of the optimizer"
+        )
+        parser.add_argument(
+            "--epochs", type=int, default=200, help="Number of training epochs"
+        )
+        parser.add_argument(
+            "--learning_rate",
+            type=float,
+            default=5e-4,
+            help="Learning rate for the optimizer",
+        )
+        parser.add_argument(
+            "--per_device_batch_size",
+            type=int,
+            default=256,
+            help="Batch size per device during training",
+        )
+        parser.add_argument(
+            "--gradient_accumulation_steps",
+            type=int,
+            default=2,
+            help="Number of steps to accumulate gradients before updating the model",
+        )
+        parser.add_argument(
+            "--logging_step", type=int, default=30, help="Logging frequency in steps"
+        )
+        parser.add_argument(
+            "--model_max_length",
+            type=int,
+            default=1024,
+            help="Maximum sequence length for the model",
+        )
+        parser.add_argument(
+            "--weight_decay",
+            type=float,
+            default=0.01,
+            help="Weight decay for regularization",
+        )
+        parser.add_argument(
+            "--resume_from_checkpoint",
+            type=str,
+            default=None,
+            help="either training checkpoint or final adapter",
+        )
+        parser.add_argument(
+            "--warmup_ratio",
+            type=float,
+            default=0.1,
+            help="Warmup ratio for learning rate scheduler",
+        )
+        parser.add_argument(
+            "--lr_scheduler_type",
+            type=str,
+            default="cosine",
+            help="Type of learning rate scheduler to use",
+        )
+        parser.add_argument(
+            "--save_and_eval_strategy",
+            type=str,
+            default="epoch",
+            help="Strategy for saving and evaluating the model (e.g., 'epoch', 'steps')",
+        )
+        parser.add_argument(
+            "--save_and_eval_steps",
+            type=int,
+            default=1000,
+            help="Steps at which to save and evaluate the model",
+        )
+        parser.add_argument(
+            "--patience",
+            type=int,
+            default=20,
+            help="Number of evaluation steps to wait before stopping training if no improvement",
+        )
+        parser.add_argument(
+            "--fp16",
+            action="store_true",
+            default=False,
+            help="Use mixed precision training (fp16)",
+        )
+        parser.add_argument(
+            "--bf16",
+            action="store_true",
+            default=False,
+            help="Use bfloat16 precision training",
+        )
+        parser.add_argument(
+            "--deepspeed",
+            type=str,
+            default=None,
+            help="Path to deepspeed configuration file",
+        )
+        parser.add_argument(
+            "--temperature",
+            type=float,
+            default=1.0,
+            help="Temperature for softmax scaling",
+        )
+        parser.add_argument(
+            "--find_unused_parameters",
+            action="store_true",
+            default=False,
+            help="Find unused parameters",
+        )
+
+        parser.add_argument(
+            "--wandb_run_name",
+            type=str,
+            default="default",
+            help="Name for the Weights & Biases run",
+        )
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            default=False,
+            help="Enable debug mode without logging to WandB",
+        )
+
+    def invoke(
+        self,
+        # global arguments
+        seed: int,
+        backbone: str,
+        base_model: str,
+        output_dir: str,
+        # dataset arguments
+        data_path: str,
+        tasks: str,
+        dataset: str,
+        index_file: str,
+        max_his_len: int,
+        # training arguments
+        optim: str,
+        epochs: int,
+        learning_rate: float,
+        per_device_batch_size: int,
+        gradient_accumulation_steps: int,
+        logging_step: int,
+        model_max_length: int,
+        weight_decay: float,
+        resume_from_checkpoint: str | None,
+        warmup_ratio: float,
+        lr_scheduler_type: str,
+        save_and_eval_strategy: str,
+        save_and_eval_steps: int,
+        patience: int,
+        fp16: bool,
+        bf16: bool,
+        deepspeed: str | None,
+        temperature: float,
+        find_unused_parameters: bool,
+        wandb_run_name: str,
+        debug: bool,
+        *args,
+        **kwargs,
+    ):
+        """
+        Train the SMB decoder using the provided arguments.
+        """
+        # Implementation of the training logic goes here.
+        self.init(
+            seed,
+            not debug,
+            (
+                wandb_run_name
+                if wandb_run_name != "default"
+                else output_dir.split("checkpoint/SMB-decoder/")[-1]
+            ),
+            "train",
+            f"Training SMB decoder on {data_path} with base model {base_model}",
+            self.param_dict,
+        )
+        ensure_dir(output_dir)
+        if len(args) > 0 or len(kwargs) > 0:
+            logger.warning("Unused parameters:", args, kwargs)
+        if backbone == "TIGER":
+            from transformers import T5Config, T5Tokenizer
+            config: T5Config = T5Config.from_pretrained(base_model)
+            tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
+                base_model,
+                model_max_length=model_max_length,
+                legacy=True,
+            )
+            assert isinstance(
+                tokenizer, T5Tokenizer
+            ), "Expected T5Tokenizer for TIGER backbone"
+        elif backbone == "PBATransformer":
+            from transformers import T5Tokenizer
+            from SeqRec.models.generative.PBATransformer import PBATransformerConfig
+            config: PBATransformerConfig = PBATransformerConfig.from_pretrained(
+                base_model
+            )
+            tokenizer: T5Tokenizer = T5Tokenizer.from_pretrained(
+                base_model,
+                model_max_length=model_max_length,
+                legacy=True,
+            )
+            assert isinstance(
+                tokenizer, T5Tokenizer
+            ), "Expected T5Tokenizer for PBATransformer backbone"
+        elif backbone in ["Qwen3", "Qwen3Session"]:
+            from transformers import Qwen3Config, Qwen2Tokenizer
+            config: Qwen3Config = Qwen3Config.from_pretrained(base_model)
+            tokenizer: Qwen2Tokenizer = Qwen2Tokenizer.from_pretrained(
+                base_model,
+                model_max_length=model_max_length,
+            )
+            assert isinstance(
+                tokenizer, Qwen2Tokenizer
+            ), "Expected Qwen2Tokenizer for Qwen3 backbone"
+        elif backbone in ["Qwen3Multi", "Qwen3SessionMulti"]:
+            from transformers import Qwen3MoeConfig, Qwen2Tokenizer
+            config: Qwen3MoeConfig = Qwen3MoeConfig.from_pretrained(base_model)
+            tokenizer: Qwen2Tokenizer = Qwen2Tokenizer.from_pretrained(
+                base_model,
+                model_max_length=model_max_length,
+            )
+            assert isinstance(
+                tokenizer, Qwen2Tokenizer
+            ), "Expected Qwen2Tokenizer for Qwen3 backbone"
+        elif backbone in ["LlamaMulti"]:
+            from transformers import Qwen2Tokenizer
+            from SeqRec.models.generative.LlamaMulti import LlamaConfig
+            config: LlamaConfig = LlamaConfig.from_pretrained(base_model)
+            tokenizer: Qwen2Tokenizer = Qwen2Tokenizer.from_pretrained(
+                base_model,
+                model_max_length=model_max_length,
+            )
+            assert isinstance(
+                tokenizer, Qwen2Tokenizer
+            ), "Expected Qwen2Tokenizer for Qwen3 backbone"
+        else:
+            raise ValueError(f"Unsupported backbone model: {backbone}")
+        deepspeed = None
+
+        train_data, valid_data = load_SMB_datasets(
+            dataset=dataset,
+            data_path=data_path,
+            max_his_len=max_his_len,
+            index_file=index_file,
+            tasks=tasks,
+        )
+        first_dataset: BaseSMBDataset = train_data.datasets[0]
+        add_num = tokenizer.add_tokens(first_dataset.get_new_tokens())
+        config.vocab_size = len(tokenizer)
+        self.info([
+            f"Added {add_num} new tokens.",
+            f"Training data size: {len(train_data)}",
+        ])
+        if self.local_rank == 0:
+            tokenizer.save_pretrained(output_dir)
+            config.save_pretrained(output_dir)
+
+        behavior_tokens = []
+        for behavior in first_dataset.behaviors:
+            behavior_tokens.extend(first_dataset.get_behavior_tokens(behavior))
+        behavior_tokens = [
+            tokenizer.encode(b, add_special_tokens=False)[0]
+            for b in behavior_tokens
+        ]
+
+        if backbone in ["Qwen3", "Qwen3Session", "Qwen3Multi", "Qwen3SessionMulti", "LlamaMulti"]:
+            # default to ignore behavior tokens in Qwen3 models
+            _decoder_only_types = (SMBExplicitDatasetForDecoder, SMBFixedRatioDatasetForDecoder)
+            collator = DecoderOnlyCollator(tokenizer, only_train_response=not isinstance(first_dataset, _decoder_only_types), ignore_behavior_tokens=behavior_tokens)
+        else:
+            collator = EncoderDecoderCollator(tokenizer)
+
+        if backbone == "TIGER":
+            from SeqRec.models.generative.TIGER import TIGER
+            model = TIGER(config)
+            model.set_hyper(temperature)
+        elif backbone == "PBATransformer":
+            all_items = first_dataset.get_all_items()
+            single_item = list(all_items)[0]
+            single_item = first_dataset.get_behavior_item(
+                single_item, first_dataset.target_behavior
+            )
+            behavior_maps = {
+                behavior_token: i
+                for i, behavior_token in enumerate(behavior_tokens)
+            }
+            config.num_behavior = len(behavior_maps)
+            config.behavior_maps = behavior_maps
+            config.use_behavior_token = (
+                len(
+                    first_dataset.get_behavior_tokens(first_dataset.target_behavior)
+                )
+                > 0
+            )
+            if not config.use_behavior_token:
+                config.behavior_injection = False
+                config.behavior_injection_encoder = []
+                config.behavior_injection_decoder = []
+            single_item_ids = tokenizer.encode(single_item, add_special_tokens=False)
+            config.num_positions = len(single_item_ids)
+            if not config.Moe_behavior_only:
+                config.num_experts = (
+                    config.num_positions + 1
+                )  # 1 for the BOS, EOS, PAD tokens
+            else:
+                config.num_experts = (
+                    2  # 1 for the item semantic tokens, 1 for the other tokens
+                )
+            config.n_positions = max_his_len
+            config.use_user_token = False
+            self.info(f"PBATransformer Model Config: {config}")
+            from SeqRec.models.generative.PBATransformer import PBATransformerForConditionalGeneration
+            model = PBATransformerForConditionalGeneration(config)
+            model.set_hyper(temperature)
+        elif backbone == "Qwen3":
+            from SeqRec.models.generative.Qwen3 import Qwen3WithTemperature
+            model = Qwen3WithTemperature(config)
+            model.set_hyper(temperature)
+        elif backbone in ["Qwen3Multi", "Qwen3SessionMulti", "LlamaMulti"]:
+            all_items = first_dataset.get_all_items()
+            single_item = list(all_items)[0]
+            single_item = first_dataset.get_behavior_item(
+                single_item, first_dataset.target_behavior
+            )
+            behavior_tokens = []
+            for behavior in first_dataset.behaviors:
+                behavior_tokens.extend(first_dataset.get_behavior_tokens(behavior))
+            behavior_tokens = [tokenizer.encode(b, add_special_tokens=False)[0] for b in behavior_tokens]
+            behavior_maps = {
+                behavior_token: i
+                for i, behavior_token in enumerate(behavior_tokens)
+            }
+            config.num_behavior = len(behavior_maps)
+            config.behavior_maps = behavior_maps
+            config.use_behavior_token = (
+                len(
+                    first_dataset.get_behavior_tokens(first_dataset.target_behavior)
+                )
+                > 0
+            )
+            if not config.use_behavior_token:
+                config.behavior_injection = False
+                config.behavior_injection_encoder = []
+                config.behavior_injection_decoder = []
+            single_item_ids = tokenizer.encode(single_item, add_special_tokens=False)
+            config.num_positions = len(single_item_ids)
+            if not config.Moe_behavior_only:
+                config.num_experts = (
+                    config.num_positions + 1
+                )  # 1 for the BOS, EOS, PAD tokens
+            else:
+                config.num_experts = (
+                    2  # 1 for the item semantic tokens, 1 for the other tokens
+                )
+            config.n_positions = max_his_len + 1
+            config.use_user_token = False
+            config.model_max_length = model_max_length
+            self.info(f"Model Config: {config}")
+            if backbone == "Qwen3Multi":
+                from SeqRec.models.generative.Qwen3Multi import Qwen3MultiWithTemperature
+                model = Qwen3MultiWithTemperature(config)
+            elif backbone == "LlamaMulti":
+                from SeqRec.models.generative.LlamaMulti import LlamaMultiWithTemperature
+                model = LlamaMultiWithTemperature(config)
+            else:
+                from SeqRec.models.generative.Qwen3SessionMulti import Qwen3SessionMultiWithTemperature
+                model = Qwen3SessionMultiWithTemperature(config)
+            model.set_hyper(temperature)
+        elif backbone == "Qwen3Session":
+            from SeqRec.models.generative.Qwen3Session import Qwen3SessionWithTemperature
+            all_items = first_dataset.get_all_items()
+            single_item = list(all_items)[0]
+            single_item = first_dataset.get_behavior_item(
+                single_item, first_dataset.target_behavior
+            )
+            single_item_ids = tokenizer.encode(single_item, add_special_tokens=False)
+            config.num_positions = len(single_item_ids)
+            config.model_max_length = model_max_length
+            model = Qwen3SessionWithTemperature(config)
+            model.set_hyper(temperature)
+        else:
+            raise ValueError(f"Unsupported backbone model: {backbone}")
+        model.resize_token_embeddings(len(tokenizer))
+        model.to(self.device)
+        self.info(model)
+        if not self.ddp and torch.cuda.device_count() > 1:
+            model.is_parallelizable = True
+            model.model_parallel = True
+
+        if backbone in ["Qwen3Session", "Qwen3Multi", "Qwen3SessionMulti", "LlamaMulti"]:
+            label_names = ['input_ids', 'labels', 'session_ids', 'extended_session_ids', 'split', 'actions']
+        else:
+            label_names = ['input_ids', 'labels', 'split']
+
+        from transformers.training_args import TrainingArguments
+        training_args = TrainingArguments(
+            output_dir=output_dir,
+            seed=seed,
+            per_device_train_batch_size=per_device_batch_size,
+            per_device_eval_batch_size=per_device_batch_size,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            warmup_ratio=warmup_ratio,
+            num_train_epochs=epochs,
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            lr_scheduler_type=lr_scheduler_type,
+            fp16=fp16,
+            bf16=bf16,
+            logging_steps=logging_step,
+            optim=optim,
+            # Set to True if you want to use gradient checkpointing
+            gradient_checkpointing=False,
+            eval_strategy=save_and_eval_strategy,
+            save_strategy=save_and_eval_strategy,
+            eval_steps=save_and_eval_steps,
+            save_steps=save_and_eval_steps,
+            save_total_limit=2,
+            load_best_model_at_end=True,
+            deepspeed=deepspeed,
+            ddp_find_unused_parameters=find_unused_parameters if self.ddp else None,
+            eval_delay=1 if save_and_eval_strategy == "epoch" else 2000,
+            run_name=(
+                wandb_run_name
+                if wandb_run_name != "default"
+                else output_dir.split("checkpoint/SMB-decoder/")[-1]
+            ),
+            label_names=label_names,
+        )
+        if debug:
+            training_args.report_to = "none"
+
+        from transformers import EarlyStoppingCallback
+        from transformers.trainer import Trainer
+        trainer = Trainer(
+            model=model,
+            train_dataset=train_data,
+            eval_dataset=valid_data,
+            args=training_args,
+            processing_class=tokenizer,
+            data_collator=collator,
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=patience)],
+        )
+        replace_progress_callback(trainer)
+        model.config.use_cache = False
+
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+        trainer.save_state()
+        trainer.save_model(output_dir=output_dir)
+        self.info("Training completed successfully.")
+        self.finish(not debug)
