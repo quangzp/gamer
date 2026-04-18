@@ -5,6 +5,15 @@
 : ${semantic_model:=llama-3.1}
 : ${checkpoint:=}
 : ${max_sent_len:=2048}
+: ${data_type:=}
+
+if [ -z "${data_type}" ]; then
+  if [ "${dataset}" = "JobChallenge" ] || [ "${dataset}" = "JobChallenge_test" ]; then
+    data_type="single"
+  else
+    data_type="SMB"
+  fi
+fi
 
 if [ -z "${checkpoint}" ]; then
   if [ "${semantic_model}" = "multilingual-e5-base" ]; then
@@ -23,3 +32,4 @@ python main.py SemEmb \
   --plm_name ${semantic_model} \
   --plm_checkpoint ${checkpoint} \
   --max_sent_len ${max_sent_len} \
+  --data_type ${data_type} \
