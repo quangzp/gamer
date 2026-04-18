@@ -1,5 +1,6 @@
 import os
 import re
+import html
 import torch
 import string
 import numpy as np
@@ -50,7 +51,7 @@ class SemanticEmbedding(Task):
             "--plm_name",
             type=str,
             default="llama",
-            help="Name of the pre-trained language model, used to name the output file."
+            help="Name of the pre-trained language model, used to name the output file (e.g., llama-3.1, multilingual-e5-base)."
         )
         parser.add_argument(
             "--plm_checkpoint",
@@ -121,6 +122,75 @@ class SemanticEmbedding(Task):
         logger.info(f"Sample text for item 0: {text_list[0]}")
         return text_list
 
+    def _clean_french_text(self, raw_text: Any) -> str:
+        if raw_text is None:
+            return ""
+        if not isinstance(raw_text, str):
+            raw_text = str(raw_text)
+        cleaned_text = html.unescape(raw_text)
+        cleaned_text = re.sub(r"</?[^>]+>", " ", cleaned_text)
+        cleaned_text = re.sub(r"[\r\n\t]+", " ", cleaned_text)
+        cleaned_text = re.sub(r"[\x00-\x1f\x7f]", " ", cleaned_text)
+        cleaned_text = re.sub(r"\s+", " ", cleaned_text).strip()
+        return cleaned_text
+
+    def french_job_text(self) -> list[list[str]]:
+        text_list: list[list[str]] = []
+        missing_text_count = 0
+        fragment_counts: list[int] = []
+
+        for item in self.item2feature:
+            data = self.item2feature[item]
+            if not isinstance(data, dict):
+                data = {}
+            fragments: list[str] = []
+
+            def append_if_valid(raw_value: Any):
+                cleaned_value = self._clean_french_text(raw_value)
+                if cleaned_value:
+                    fragments.append(cleaned_value)
+
+            append_if_valid(data.get("title"))
+            append_if_valid(data.get("summary"))
+
+            sections = data.get("sections", [])
+            if isinstance(sections, list):
+                for section in sections:
+                    if isinstance(section, dict):
+                        append_if_valid(section.get("content"))
+                    else:
+                        append_if_valid(section)
+
+            tasks = data.get("tasks", [])
+            if isinstance(tasks, list):
+                for task in tasks:
+                    append_if_valid(task)
+
+            skills = data.get("skills", [])
+            if isinstance(skills, list):
+                for skill in skills:
+                    if isinstance(skill, dict):
+                        append_if_valid(skill.get("name"))
+                    else:
+                        append_if_valid(skill)
+
+            merged_text = " ".join(fragments).strip()
+            if not merged_text:
+                missing_text_count += 1
+                merged_text = "missing information"
+
+            text_list.append([merged_text])
+            fragment_counts.append(len(fragments))
+
+        if fragment_counts:
+            avg_fragments = sum(fragment_counts) / len(fragment_counts)
+            logger.info(
+                f"French job text extraction stats - items: {len(fragment_counts)}, "
+                f"avg_fragments: {avg_fragments:.2f}, missing_text_items: {missing_text_count}"
+            )
+        logger.info(f"Sample text for item 0: {text_list[0] if text_list else 'N/A'}")
+        return text_list
+
     def process_texts(self) -> list[list[str]]:
         if self.dataset in ['Instruments', 'Beauty', 'Yelp']:
             return self.amazon_text(["title", "description"])
@@ -128,6 +198,8 @@ class SemanticEmbedding(Task):
             return self.kuairec_text()
         elif self.dataset in ["Tmall", "Tmall-24-0.25"]:
             return self.Tmall_text()
+        elif self.dataset in ["JobChallenge", "JobChallenge_test"]:
+            return self.french_job_text()
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset}.")
 
@@ -142,7 +214,9 @@ class SemanticEmbedding(Task):
         n_text = len(texts[0])
         flattened_texts = [text for text_list in texts for text in text_list]
 
-        if 't5' in self.plm_name.lower() or 'embedding' in self.plm_name.lower():  # T5 or embedding models
+        model_name = self.plm_name.lower()
+        checkpoint_name = self.plm_checkpoint.lower()
+        if any(keyword in model_name or keyword in checkpoint_name for keyword in ["t5", "embedding", "e5"]):  # T5/E5 or embedding models
             # Use SentenceTransformer for sentence embeddings
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.plm_checkpoint, device=self.device)

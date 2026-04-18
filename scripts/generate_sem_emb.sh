@@ -3,8 +3,18 @@
 : ${dataset:=Beauty}
 : ${gpu:=0}
 : ${semantic_model:=llama-3.1}
-: ${checkpoint:=Meta-llama/Meta-Llama-3.1-8B}
+: ${checkpoint:=}
 : ${max_sent_len:=2048}
+
+if [ -z "${checkpoint}" ]; then
+  if [ "${semantic_model}" = "multilingual-e5-base" ]; then
+    checkpoint="intfloat/multilingual-e5-base"
+  elif [ "${semantic_model}" = "llama-3.1" ]; then
+    checkpoint="Meta-llama/Meta-Llama-3.1-8B"
+  else
+    checkpoint="${semantic_model}"
+  fi
+fi
 
 python main.py SemEmb \
   --dataset ${dataset} \
