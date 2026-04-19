@@ -106,6 +106,27 @@ else
     echo "Using checkpoint from step ${ckpt_num}."
 fi
 
+: ${export_submission:=0}
+: ${submission_topk:=10}
+: ${submission_file:=}
+: ${uid_map_file:=}
+: ${item_map_file:=}
+: ${apply_behavior_label:=apply}
+submission_args=""
+if [ $export_submission -eq 1 ]; then
+    submission_args="${submission_args} --export_submission --submission_topk ${submission_topk} --apply_behavior_label ${apply_behavior_label}"
+    if [ "${submission_file}" != "" ]; then
+        submission_args="${submission_args} --submission_file ${submission_file}"
+    fi
+    if [ "${uid_map_file}" != "" ]; then
+        submission_args="${submission_args} --uid_map_file ${uid_map_file}"
+    fi
+    if [ "${item_map_file}" != "" ]; then
+        submission_args="${submission_args} --item_map_file ${item_map_file}"
+    fi
+    echo "Submission export enabled: topk=${submission_topk}, apply_behavior_label=${apply_behavior_label}."
+fi
+
 : ${extra_args:=}
 # transform the format of "X=a,Y=b" into "-X a -Y b"
 extra_args_out=$(echo "$extra_args" | awk -F, '{
@@ -133,6 +154,7 @@ if [ $gpu_num -eq 1 ]; then
         --num_beams 20 \
         --index_file ${index_file} \
         --test_task ${test_task} \
+        ${submission_args} \
         ${extra_args_out} \
         ${extra_flags_out}
 else
@@ -147,6 +169,7 @@ else
         --num_beams 20 \
         --index_file ${index_file} \
         --test_task ${test_task} \
+        ${submission_args} \
         ${extra_args_out} \
         ${extra_flags_out}
 fi

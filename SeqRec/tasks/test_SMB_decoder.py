@@ -1,10 +1,11 @@
 import os
+import csv
 import json
 import torch
 import numpy as np
 import torch.distributed as dist
 from loguru import logger
-from typing import Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -62,6 +63,41 @@ class TestSMBDecoder(MultiGPUTask):
         parser.add_argument("--test_task", type=str, default="SeqRec")
         parser.add_argument("--behaviors", type=str, nargs="+", default=None, help="The behavior list.")
         parser.add_argument("--valid_loss", action="store_true", help="Whether to calculate valid loss instead of testing.")
+        parser.add_argument(
+            "--export_submission",
+            action="store_true",
+            help="Export challenge submission CSV after testing.",
+        )
+        parser.add_argument(
+            "--submission_file",
+            type=str,
+            default="",
+            help="Submission csv path. If empty, save next to results_file.",
+        )
+        parser.add_argument(
+            "--submission_topk",
+            type=int,
+            default=10,
+            help="Top-K jobs per session in submission.",
+        )
+        parser.add_argument(
+            "--uid_map_file",
+            type=str,
+            default="",
+            help="Path to <dataset>.uid_to_original_session.json",
+        )
+        parser.add_argument(
+            "--item_map_file",
+            type=str,
+            default="",
+            help="Path to <dataset>.item_to_raw_job.json",
+        )
+        parser.add_argument(
+            "--apply_behavior_label",
+            type=str,
+            default="apply",
+            help="Behavior label treated as applies_for=True.",
+        )
 
     def check_collision_items(self) -> list[dict[str, int | float]]:
         ret_list = []
@@ -86,6 +122,160 @@ class TestSMBDecoder(MultiGPUTask):
             }
             ret_list.append(ret)
         return ret_list
+
+    @staticmethod
+    def _load_json_if_exists(path: str) -> dict[str, Any]:
+        if path == "":
+            return {}
+        if not os.path.exists(path):
+            logger.warning(f"Mapping file not found: {path}")
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            mapping = json.load(f)
+        if not isinstance(mapping, dict):
+            logger.warning(f"Unexpected mapping format at {path}. Expected a JSON object.")
+            return {}
+        return {str(k): v for k, v in mapping.items()}
+
+    @staticmethod
+    def _uid_sort_key(uid: str) -> tuple[int, int | str]:
+        return (0, int(uid)) if uid.isdigit() else (1, uid)
+
+    @staticmethod
+    def _collect_beam_candidates(
+        output_items: list[list[str]],
+        scores: torch.Tensor,
+        num_beams: int,
+    ) -> list[dict[str, list[str] | list[float]]]:
+        flat_scores = scores.detach().cpu().tolist()
+        beam_candidates: list[dict[str, list[str] | list[float]]] = []
+        for i, items in enumerate(output_items):
+            beam_scores = flat_scores[i * num_beams: (i + 1) * num_beams]
+            pairs: list[tuple[str, float]] = sorted(
+                zip(items, beam_scores),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            dedup_items: list[str] = []
+            dedup_scores: list[float] = []
+            seen = set()
+            for item, score in pairs:
+                if item in seen:
+                    continue
+                seen.add(item)
+                dedup_items.append(item)
+                dedup_scores.append(float(score))
+            beam_candidates.append({
+                "items": dedup_items,
+                "scores": dedup_scores,
+            })
+        return beam_candidates
+
+    def _update_submission_predictions(
+        self,
+        uids: list[str],
+        behavior: str,
+        beam_candidates: list[dict[str, list[str] | list[float]]],
+    ):
+        for i, uid in enumerate(uids):
+            uid_str = str(uid)
+            candidate = beam_candidates[i]
+            candidate_items = candidate["items"]
+            candidate_scores = candidate["scores"]
+            assert isinstance(candidate_items, list)
+            assert isinstance(candidate_scores, list)
+            top_score = float(candidate_scores[0]) if len(candidate_scores) > 0 else float("-inf")
+            current = self.submission_predictions.get(uid_str)
+            if current is None or top_score > current["top_score"]:
+                self.submission_predictions[uid_str] = {
+                    "behavior": behavior,
+                    "items": candidate_items,
+                    "scores": candidate_scores,
+                    "top_score": top_score,
+                }
+
+    def _export_submission_file(self):
+        if self.submission_topk <= 0:
+            raise ValueError("submission_topk must be positive.")
+        if len(self.submission_predictions) == 0:
+            logger.warning("No submission predictions were collected. Submission rows may be empty or unmapped.")
+
+        uid_map_file = self.uid_map_file
+        item_map_file = self.item_map_file
+        if uid_map_file == "":
+            uid_map_file = os.path.join(
+                self.data_path,
+                self.dataset_name,
+                f"{self.dataset_name}.uid_to_original_session.json",
+            )
+        if item_map_file == "":
+            item_map_file = os.path.join(
+                self.data_path,
+                self.dataset_name,
+                f"{self.dataset_name}.item_to_raw_job.json",
+            )
+
+        uid_map = self._load_json_if_exists(uid_map_file)
+        item_map = self._load_json_if_exists(item_map_file)
+
+        if len(uid_map) > 0:
+            uid_list = sorted(uid_map.keys(), key=self._uid_sort_key)
+        else:
+            uid_list = sorted(self.submission_predictions.keys(), key=self._uid_sort_key)
+
+        rows = []
+        for uid in uid_list:
+            prediction = self.submission_predictions.get(uid)
+            behavior = str(prediction["behavior"]).lower() if prediction is not None else ""
+            if behavior == "":
+                fallback_behavior = next(
+                    (b for b in self.behaviors if b.lower() != self.apply_behavior_label.lower()),
+                    self.apply_behavior_label,
+                )
+                behavior = fallback_behavior.lower()
+
+            candidate_tokens: list[str] = []
+            if prediction is not None:
+                candidate_tokens = prediction["items"][: self.submission_topk]
+
+            raw_job_ids: list[str | int] = []
+            for token_str in candidate_tokens:
+                item_id = self.item_token_to_item_id.get(token_str)
+                if item_id is None:
+                    continue
+                raw_job_id = item_map.get(str(item_id), str(item_id))
+                raw_job_id_str = str(raw_job_id)
+                raw_job_ids.append(int(raw_job_id_str) if raw_job_id_str.isdigit() else raw_job_id_str)
+                if len(raw_job_ids) >= self.submission_topk:
+                    break
+
+            session_id = uid_map.get(uid, uid)
+            row = {
+                "session_id": str(session_id),
+                "action": behavior,
+                "job_id": json.dumps(raw_job_ids, ensure_ascii=False),
+            }
+            rows.append(row)
+
+        output_file = self.submission_file
+        if output_file == "":
+            output_file = self.results_file.replace(".json", ".submission.csv")
+        output_parent = os.path.dirname(output_file)
+        if output_parent != "":
+            ensure_dir(output_parent)
+
+        fieldnames = [
+            "session_id",
+            "action",
+            "job_id",
+        ]
+
+        with open(output_file, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+
+        logger.success(f"Submission saved to {output_file} with {len(rows)} rows.")
 
     def test_single_behavior(self, loader: DataLoader, num_beams: int, behavior: str) -> dict[str, float]:
         from transformers.generation import GenerationMixin
@@ -214,6 +404,7 @@ class TestSMBDecoder(MultiGPUTask):
                     i * num_beams: (i + 1) * num_beams
                 ] for i in range(batch_size)
             ]
+            beam_candidates = self._collect_beam_candidates(output_items, scores, num_beams)
             history_items = inputs['inters_item_list']
 
             # count how many output items are in the history items for each sample
@@ -241,6 +432,8 @@ class TestSMBDecoder(MultiGPUTask):
                 dist.all_gather_object(obj=targets, object_list=targets_gather_list)
                 duplicate_ratio_gather_list = [None for _ in range(self.world_size)]
                 dist.all_gather_object(obj=duplicate_ratio, object_list=duplicate_ratio_gather_list)
+                beam_candidates_gather_list = [None for _ in range(self.world_size)]
+                dist.all_gather_object(obj=beam_candidates, object_list=beam_candidates_gather_list)
 
                 all_device_topk_res = []
                 for ga_res in res_gather_list:
@@ -255,6 +448,10 @@ class TestSMBDecoder(MultiGPUTask):
                 for ga_duplicate_ratio in duplicate_ratio_gather_list:
                     all_device_duplicate_ratio += ga_duplicate_ratio
                 duplicate_ratio = all_device_duplicate_ratio
+                all_device_beam_candidates = []
+                for ga_beam_candidates in beam_candidates_gather_list:
+                    all_device_beam_candidates += ga_beam_candidates
+                beam_candidates = all_device_beam_candidates
 
                 if 'uid' in inputs:
                     uid = inputs['uid']
@@ -268,6 +465,9 @@ class TestSMBDecoder(MultiGPUTask):
                 total += batch_size
                 if 'uid' in inputs:
                     uid = inputs['uid']
+
+            if self.export_submission and 'uid' in inputs:
+                self._update_submission_predictions(uid, behavior, beam_candidates)
 
             if 'uid' in inputs:
                 batch_metrics_res = get_metrics_results(topk_res, self.metric_list, targets, list_output=True)
@@ -384,6 +584,12 @@ class TestSMBDecoder(MultiGPUTask):
         test_task: str,
         behaviors: list[str] | None,
         valid_loss: bool,
+        export_submission: bool,
+        submission_file: str,
+        submission_topk: int,
+        uid_map_file: str,
+        item_map_file: str,
+        apply_behavior_label: str,
         *args,
         **kwargs
     ):
@@ -567,6 +773,20 @@ class TestSMBDecoder(MultiGPUTask):
         self.metric_list = metrics.split(",")
         self.backbone = backbone
         self.results_file = results_file
+        self.export_submission = export_submission
+        self.submission_file = submission_file
+        self.submission_topk = submission_topk
+        self.uid_map_file = uid_map_file
+        self.item_map_file = item_map_file
+        self.apply_behavior_label = apply_behavior_label
+        self.data_path = data_path
+        self.dataset_name = dataset
+        self.submission_predictions: dict[str, dict[str, Any]] = {}
+        if not valid_loss:
+            self.item_token_to_item_id = {
+                "".join(index_tokens): str(item_id)
+                for item_id, index_tokens in self.datasets[0].indices.items()
+            }
 
         if valid_loss:
             self.info("Testing valid dataset...")
@@ -587,5 +807,10 @@ class TestSMBDecoder(MultiGPUTask):
                 with open(self.results_file, "w") as f:
                     json.dump(results, f, indent=4)
             logger.success(f"Results saved to {self.results_file}.")
+            if self.export_submission:
+                if self.local_rank == 0:
+                    self._export_submission_file()
+                if self.ddp:
+                    dist.barrier()
 
         self.finish(False)

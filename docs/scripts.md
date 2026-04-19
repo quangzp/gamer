@@ -43,3 +43,37 @@ Some general arguments for the above scripts are as follows:
 - `extra_flags`: Extra flags for the task (only used for some evaluation tasks). You can specify multiple extra flags by separating them with commas (e.g., `extra_flags="flag1,flag2"`, etc.). Note that there should be no spaces around the commas.
 
 For other arguments, please refer to the corresponding script files in the `scripts/` directory and the corresponding task files in the `SeqRec/tasks/` directory.
+
+### Generative Submission Export (JobChallenge)
+
+The `test_SMB_decoder.sh` script now supports exporting challenge-ready submission CSV directly from the generative branch.
+
+Example:
+```bash
+dataset=JobChallenge_test \
+tasks=smb_explicit \
+test_task=smb_explicit \
+backbone=TIGER \
+gpu=0 \
+rq_kmeans=0 \
+alpha=0.02 \
+beta=0.0001 \
+epoch=20000 \
+ckpt_num=best \
+export_submission=1 \
+submission_topk=10 \
+submission_file=./results/JobChallenge_test/submission-generative.csv \
+apply_behavior_label=apply \
+bash scripts/test_SMB_decoder.sh
+```
+
+Optional mapping files:
+- `uid_map_file`: Path to `<dataset>.uid_to_original_session.json`
+- `item_map_file`: Path to `<dataset>.item_to_raw_job.json`
+
+If `submission_file` is not provided, the script will save a CSV next to `results_file` using the suffix `.submission.csv`.
+
+Exported CSV schema (generative submission):
+- `session_id`: original session identifier
+- `action`: predicted action label (e.g., `view` or `apply`)
+- `job_id`: JSON list of top-k predicted job ids
