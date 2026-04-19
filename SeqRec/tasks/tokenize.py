@@ -230,7 +230,7 @@ class Tokenize(Task):
 
         self.model = RQVAE(
             in_dim=self.data.dim,
-            num_code_list=ckpt_args.num_code_list,
+            num_emb_list=ckpt_args.num_emb_list,
             e_dim=ckpt_args.e_dim,
             layers=ckpt_args.layers,
             dropout_prob=ckpt_args.dropout_prob,
