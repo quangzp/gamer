@@ -57,7 +57,7 @@ class TestSMBDecoder(MultiGPUTask):
         parser.add_argument(
             "--metrics",
             type=str,
-            default="hit@1,hit@5,hit@10,recall@1,recall@5,recall@10,ndcg@5,ndcg@10",
+            default="hit@1,hit@5,hit@10,recall@1,recall@5,recall@10,ndcg@5,ndcg@10,mrr@1,mrr@5,mrr@10,action_acc",
             help="test metrics, separate by comma",
         )
         parser.add_argument("--test_task", type=str, default="SeqRec")
@@ -194,6 +194,32 @@ class TestSMBDecoder(MultiGPUTask):
                     "top_score": top_score,
                 }
 
+    @staticmethod
+    def _mrr_k(topk_results: list[list[int]], k: int) -> list[float]:
+        mrrs = []
+        for row in topk_results:
+            reciprocal_rank = 0.0
+            for i, hit in enumerate(row[:k]):
+                if hit == 1:
+                    reciprocal_rank = 1.0 / float(i + 1)
+                    break
+            mrrs.append(reciprocal_rank)
+        return mrrs
+
+    @staticmethod
+    def _build_uid_to_first_target_behavior(dataset: BaseSMBDataset) -> dict[str, str]:
+        uid_to_first_behavior: dict[str, str] = {}
+        for sample in dataset.inter_data:
+            if "uid" not in sample:
+                continue
+            uid = str(sample["uid"])
+            behavior = sample.get("behavior")
+            if isinstance(behavior, list) and len(behavior) > 0:
+                uid_to_first_behavior[uid] = str(behavior[0]).lower()
+            elif isinstance(behavior, str):
+                uid_to_first_behavior[uid] = behavior.lower()
+        return uid_to_first_behavior
+
     def _export_submission_file(self):
         if self.submission_topk <= 0:
             raise ValueError("submission_topk must be positive.")
@@ -284,7 +310,7 @@ class TestSMBDecoder(MultiGPUTask):
         total = 0
         pbar = get_tqdm(desc=f"Testing ({EvaluationType.FIXED_BEHAVIOR.value} {behavior})", total=len(loader))
 
-        user_metric_dict: dict[str, dict[int, float]] = {m: {} for m in self.metric_list}
+        user_metric_dict: dict[str, dict[str, float]] = {m: {} for m in self.per_behavior_metric_list}
 
         duplicate_ratios = []
         for batch in loader:
@@ -466,19 +492,33 @@ class TestSMBDecoder(MultiGPUTask):
                 if 'uid' in inputs:
                     uid = inputs['uid']
 
-            if self.export_submission and 'uid' in inputs:
+            if (self.export_submission or self.need_action_acc) and 'uid' in inputs:
                 self._update_submission_predictions(uid, behavior, beam_candidates)
 
+            batch_metrics_res: dict[str, float] = {}
             if 'uid' in inputs:
-                batch_metrics_res = get_metrics_results(topk_res, self.metric_list, targets, list_output=True)
-                for m in batch_metrics_res:
+                batch_metrics_list_res: dict[str, list[float]] = {}
+                if len(self.ranking_metric_list) > 0:
+                    ranking_metrics_res = get_metrics_results(topk_res, self.ranking_metric_list, targets, list_output=True)
+                    for m in ranking_metrics_res:
+                        assert isinstance(ranking_metrics_res[m], list)
+                        batch_metrics_list_res[m] = ranking_metrics_res[m]
+                for m in self.mrr_metric_list:
+                    batch_metrics_list_res[m] = self._mrr_k(topk_res, self.mrr_metric_k[m])
+
+                for m in batch_metrics_list_res:
                     for i in range(len(uid)):
-                        user_metric_dict[m][uid[i]] = batch_metrics_res[m][i]
-                batch_metrics_res = {
-                    m: sum(batch_metrics_res[m]) for m in batch_metrics_res
-                }
+                        user_metric_dict[m][str(uid[i])] = batch_metrics_list_res[m][i]
+                batch_metrics_res = {m: sum(batch_metrics_list_res[m]) for m in batch_metrics_list_res}
             else:
-                batch_metrics_res = get_metrics_results(topk_res, self.metric_list, targets, list_output=False)
+                if len(self.ranking_metric_list) > 0:
+                    ranking_metrics_res = get_metrics_results(topk_res, self.ranking_metric_list, targets, list_output=False)
+                    for m in ranking_metrics_res:
+                        assert isinstance(ranking_metrics_res[m], float)
+                        batch_metrics_res[m] = ranking_metrics_res[m]
+                for m in self.mrr_metric_list:
+                    batch_metrics_res[m] = float(sum(self._mrr_k(topk_res, self.mrr_metric_k[m])))
+
             for m, res in batch_metrics_res.items():
                 if m not in results:
                     results[m] = res
@@ -487,7 +527,7 @@ class TestSMBDecoder(MultiGPUTask):
             duplicate_ratios.extend(duplicate_ratio)
 
             if self.local_rank == 0:
-                show_metric_keys = self.metric_list[:2]  # Show only the first two metrics
+                show_metric_keys = self.per_behavior_metric_list[:2]  # Show only the first two metrics
                 show_metric_dict = {
                     m: f"{results[m] / total:.4f}" for m in show_metric_keys if m in results
                 }
@@ -504,7 +544,7 @@ class TestSMBDecoder(MultiGPUTask):
             results[m] = results[m] / total
         results["Avg. Duplicate Ratio"] = np.mean(duplicate_ratios)
 
-        if len(user_metric_dict[self.metric_list[0]]) > 0:
+        if len(self.per_behavior_metric_list) > 0 and len(user_metric_dict[self.per_behavior_metric_list[0]]) > 0:
             # Save user-level metrics
             save_path = os.path.join(
                 self.results_file.replace(".json", ""),
@@ -527,19 +567,36 @@ class TestSMBDecoder(MultiGPUTask):
 
     def test(self, num_beams: int) -> list[dict[str, float]]:
         results = []
-        merge_results = {m: 0.0 for m in self.metric_list}
+        merge_results = {m: 0.0 for m in self.per_behavior_metric_list}
         total = 0
         for i, behavior in enumerate(self.behaviors):
             result = self.test_single_behavior(self.loaders[i], num_beams, behavior)
             result['eval_type'] = f"Behavior {behavior}"
             result['collision_info'] = self.collision_info[i]
             results.append(result)
-            for m in self.metric_list:
+            for m in self.per_behavior_metric_list:
                 assert m in result, f"Metric {m} not found in results for behavior {behavior}."
                 merge_results[m] += result[m] * len(self.loaders[i].dataset)
             total += len(self.loaders[i].dataset)
-        for m in merge_results:
+        for m in self.per_behavior_metric_list:
             merge_results[m] /= total
+
+        if self.need_action_acc:
+            total_session_num = len(self.uid_to_first_target_behavior)
+            correct_action_num = 0
+            for uid, gt_behavior in self.uid_to_first_target_behavior.items():
+                pred = self.submission_predictions.get(uid)
+                if pred is not None and str(pred["behavior"]).lower() == gt_behavior:
+                    correct_action_num += 1
+            if total_session_num == 0:
+                logger.warning("No uid-to-behavior ground truth found. action_acc is set to 0.0.")
+                merge_results["action_acc"] = 0.0
+            else:
+                merge_results["action_acc"] = correct_action_num / total_session_num
+                logger.info(
+                    f"Action accuracy: {merge_results['action_acc']:.4f} ({correct_action_num}/{total_session_num})."
+                )
+
         merge_results['eval_type'] = "Merged Behavior"
         results.append(merge_results)
         return results
@@ -659,6 +716,32 @@ class TestSMBDecoder(MultiGPUTask):
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         logger.success(f"Model {backbone} has {total_params} parameters, {trainable_params} of them are trainable.")
 
+        self.metric_list = [m.strip() for m in metrics.split(",") if m.strip() != ""]
+        if len(self.metric_list) == 0:
+            raise ValueError("At least one metric must be provided.")
+        self.ranking_metric_list: list[str] = []
+        self.mrr_metric_list: list[str] = []
+        self.mrr_metric_k: dict[str, int] = {}
+        self.need_action_acc = False
+        for metric in self.metric_list:
+            metric_lower = metric.lower()
+            if metric_lower.startswith("hit@") or metric_lower.startswith("recall@") or metric_lower.startswith("ndcg@"):
+                self.ranking_metric_list.append(metric)
+            elif metric_lower.startswith("mrr@"):
+                try:
+                    k = int(metric.split("@")[1])
+                except (IndexError, ValueError) as e:
+                    raise ValueError(f"Invalid MRR metric format: {metric}. Expected mrr@K.") from e
+                if k <= 0:
+                    raise ValueError(f"Invalid MRR metric format: {metric}. K must be positive.")
+                self.mrr_metric_list.append(metric)
+                self.mrr_metric_k[metric] = k
+            elif metric_lower == "action_acc":
+                self.need_action_acc = True
+            else:
+                raise ValueError(f"Unsupported metric: {metric}")
+        self.per_behavior_metric_list = self.ranking_metric_list + self.mrr_metric_list
+
         if valid_loss:
             self.valid_dataset = load_SMB_valid_dataset(
                 dataset,
@@ -681,6 +764,12 @@ class TestSMBDecoder(MultiGPUTask):
                 self.behaviors = self.base_dataset.behaviors
             else:
                 self.behaviors = behaviors
+
+            if self.need_action_acc:
+                self.uid_to_first_target_behavior = self._build_uid_to_first_target_behavior(self.base_dataset)
+                if len(self.uid_to_first_target_behavior) == 0:
+                    raise ValueError("Metric action_acc requires uid and behavior in the SMB test dataset.")
+
             for behavior in self.behaviors:
                 self.datasets.append(self.base_dataset.filter_by_behavior(behavior))
                 self.info(f"Loaded dataset for behavior {behavior} with {len(self.datasets[-1])} samples.")
@@ -770,7 +859,6 @@ class TestSMBDecoder(MultiGPUTask):
         ])
 
         self.model.eval()
-        self.metric_list = metrics.split(",")
         self.backbone = backbone
         self.results_file = results_file
         self.export_submission = export_submission
