@@ -1,0 +1,4 @@
+interface:
+  display_name: "GAMER Generative Upgrade"
+  short_description: "Improve GAMER's generative branch"
+  default_prompt: "Use $gamer-generative-upgrade to improve the generative recommendation pipeline in this GAMER repo."

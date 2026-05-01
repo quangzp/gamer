@@ -8,7 +8,7 @@
 : ${data_type:=}
 
 if [ -z "${data_type}" ]; then
-  if [ "${dataset}" = "JobChallenge" ] || [ "${dataset}" = "JobChallenge_test" ]; then
+  if [[ "${dataset}" == JobChallenge* ]]; then
     data_type="single"
   else
     data_type="SMB"

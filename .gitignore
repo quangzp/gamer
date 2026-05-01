@@ -19,3 +19,4 @@ data/*/*
 scripts/test.sh
 *.pth
 *.ipynb
+challenge_data/*

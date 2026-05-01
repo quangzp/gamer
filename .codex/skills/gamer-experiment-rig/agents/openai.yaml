@@ -1,0 +1,4 @@
+interface:
+  display_name: "GAMER Experiment Rig"
+  short_description: "Run disciplined GAMER ablations"
+  default_prompt: "Use $gamer-experiment-rig to design, run, and compare controlled experiments in this GAMER repo."

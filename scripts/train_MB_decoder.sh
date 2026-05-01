@@ -8,14 +8,25 @@
 : ${epochs:=200}
 : ${port:=2314}
 : ${backbone:=TIGER}
+: ${temperature:=0.7}
+: ${omp_num_threads:=1}
+: ${debug_sync_cuda:=0}
+: ${gradient_checkpointing:=0}
+: ${deepspeed_config:=}
 
 export CUDA_VISIBLE_DEVICES=$gpu
-export CUDA_LAUNCH_BLOCKING=1
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=$omp_num_threads
+if [ $debug_sync_cuda -eq 1 ]; then
+    export CUDA_LAUNCH_BLOCKING=1
+    echo "CUDA_LAUNCH_BLOCKING enabled for synchronous CUDA debugging."
+else
+    unset CUDA_LAUNCH_BLOCKING
+fi
 
 gpu_num=$(echo $gpu | awk -F, '{print NF}')
 per_device_batch_size=$(($batch_size / $gpu_num))
 task_dir=${tasks//,/-}
+backbone_arg=${backbone}
 
 if [ "${backbone}" = "TIGER" ]; then
     base_model=./config/s2s-models/TIGER
@@ -23,14 +34,22 @@ elif [ "${backbone}" = "PBATransformer" ]; then
     base_model=./config/s2s-models/PBATransformer
 elif [ "${backbone}" = "Qwen3" ]; then
     base_model=./config/s2s-models/Qwen3-Light
-elif [ "${backbone}" = "Qwen3Multi" ]; then
-    base_model=./config/s2s-models/Qwen3Multi
+elif [ "${backbone}" = "Qwen3Moe" ]; then
+    base_model=./config/s2s-models/Qwen3Moe
+elif [[ "${backbone}" == Qwen3Multi* ]]; then
+    base_model=./config/s2s-models/${backbone}
+    backbone_arg=Qwen3Multi
 else
     echo "Unsupported backbone model: ${backbone}."
     exit 1
 fi
 
 task_dir=${dataset}/${task_dir}/${backbone}
+
+: ${suffix:=}
+if [ "${suffix}" != "" ]; then
+    task_dir=${task_dir}_${suffix}
+fi
 
 if [ $rq_kmeans -eq 0 ]; then
     : ${cid:=0}
@@ -97,7 +116,6 @@ else
 fi
 
 : ${extra_args:=}
-# transform the format of "X=a,Y=b" into "-X a -Y b"
 extra_args_out=$(echo "$extra_args" | awk -F, '{
     for(i=1; i<=NF; i++) {
         split($i, arr, "=")
@@ -106,10 +124,23 @@ extra_args_out=$(echo "$extra_args" | awk -F, '{
 }')
 echo "Extra arguments: ${extra_args_out}"
 
+: ${extra_flags:=}
+extra_flags_out=$(echo "$extra_flags" | awk -F, '{for(i=1; i<=NF; i++) printf "--%s ", $i}')
+echo "Extra flags: ${extra_flags_out}"
+
+train_runtime_flags=""
+if [ $gradient_checkpointing -eq 1 ]; then
+    train_runtime_flags="${train_runtime_flags} --gradient_checkpointing"
+fi
+if [ "${deepspeed_config}" != "" ]; then
+    train_runtime_flags="${train_runtime_flags} --deepspeed ${deepspeed_config}"
+fi
+echo "Runtime flags: ${train_runtime_flags}"
+
 if [ $gpu_num -eq 1 ]; then
     echo "Using single GPU: ${gpu}"
     python main.py train_MB_decoder \
-        --backbone ${backbone} \
+        --backbone ${backbone_arg} \
         --base_model ${base_model} \
         --output_dir ${output_dir} \
         --wandb_run_name ${run_name} \
@@ -119,12 +150,14 @@ if [ $gpu_num -eq 1 ]; then
         --tasks ${tasks} \
         --epochs ${epochs} \
         --index_file ${index_file} \
-        --temperature 0.7 \
-        ${extra_args_out}
+        --temperature ${temperature} \
+        ${train_runtime_flags} \
+        ${extra_args_out} \
+        ${extra_flags_out}
 else
     echo "Using multiple GPUs: ${gpu}"
     torchrun --nproc_per_node=${gpu_num} --master_port=${port} ./main.py train_MB_decoder \
-        --backbone ${backbone} \
+        --backbone ${backbone_arg} \
         --base_model ${base_model} \
         --output_dir ${output_dir} \
         --wandb_run_name ${run_name} \
@@ -134,6 +167,8 @@ else
         --tasks ${tasks} \
         --epochs ${epochs} \
         --index_file ${index_file} \
-        --temperature 0.7 \
-        ${extra_args_out}
+        --temperature ${temperature} \
+        ${train_runtime_flags} \
+        ${extra_args_out} \
+        ${extra_flags_out}
 fi

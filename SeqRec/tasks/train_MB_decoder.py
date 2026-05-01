@@ -128,12 +128,36 @@ class TrainMBDecoder(MultiGPUTask):
             default=1.0,
             help="Temperature for softmax scaling",
         )
+        parser.add_argument(
+            "--find_unused_parameters",
+            action="store_true",
+            default=False,
+            help="Find unused parameters in DDP training.",
+        )
+        parser.add_argument(
+            "--gradient_checkpointing",
+            action="store_true",
+            default=False,
+            help="Enable gradient checkpointing to reduce activation memory.",
+        )
+        parser.add_argument(
+            "--metric_for_best_model",
+            type=str,
+            default="eval_loss",
+            help="Metric used by Trainer to keep the best checkpoint. Defaults to eval_loss.",
+        )
 
         parser.add_argument(
             "--wandb_run_name",
             type=str,
             default="default",
             help="Name for the Weights & Biases run",
+        )
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            default=False,
+            help="Enable debug mode without logging to WandB",
         )
 
     def invoke(
@@ -168,7 +192,11 @@ class TrainMBDecoder(MultiGPUTask):
         bf16: bool,
         deepspeed: str | None,
         temperature: float,
+        find_unused_parameters: bool,
+        gradient_checkpointing: bool,
+        metric_for_best_model: str,
         wandb_run_name: str,
+        debug: bool,
         *args,
         **kwargs,
     ):
@@ -178,7 +206,7 @@ class TrainMBDecoder(MultiGPUTask):
         # Implementation of the training logic goes here.
         self.init(
             seed,
-            True,
+            not debug,
             (
                 wandb_run_name
                 if wandb_run_name != "default"
@@ -248,7 +276,7 @@ class TrainMBDecoder(MultiGPUTask):
             ), "Expected Qwen2Tokenizer for Qwen3Multi backbone"
         else:
             raise ValueError(f"Unsupported backbone model: {backbone}")
-        deepspeed = None
+        deepspeed = deepspeed if deepspeed not in [None, ""] else None
 
         train_data, valid_data = load_MB_datasets(
             dataset=dataset,
@@ -409,16 +437,17 @@ class TrainMBDecoder(MultiGPUTask):
             bf16=bf16,
             logging_steps=logging_step,
             optim=optim,
-            # Set to True if you want to use gradient checkpointing
-            gradient_checkpointing=False,
+            gradient_checkpointing=gradient_checkpointing,
             eval_strategy=save_and_eval_strategy,
             save_strategy=save_and_eval_strategy,
             eval_steps=save_and_eval_steps,
             save_steps=save_and_eval_steps,
             save_total_limit=2,
             load_best_model_at_end=True,
+            metric_for_best_model=metric_for_best_model,
+            greater_is_better=False if metric_for_best_model == "eval_loss" else True,
             deepspeed=deepspeed,
-            ddp_find_unused_parameters=False if self.ddp else None,
+            ddp_find_unused_parameters=find_unused_parameters if self.ddp else None,
             eval_delay=1 if save_and_eval_strategy == "epoch" else 2000,
             run_name=(
                 wandb_run_name
@@ -427,6 +456,8 @@ class TrainMBDecoder(MultiGPUTask):
             ),
             label_names=label_names,
         )
+        if debug:
+            training_args.report_to = "none"
 
         from transformers import EarlyStoppingCallback
         from transformers.trainer import Trainer
@@ -447,4 +478,4 @@ class TrainMBDecoder(MultiGPUTask):
         trainer.save_state()
         trainer.save_model(output_dir=output_dir)
         self.info("Training completed successfully.")
-        self.finish(True)
+        self.finish(not debug)

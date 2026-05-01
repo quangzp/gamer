@@ -1,0 +1,21 @@
+{
+    "dataset": "JobChallengeMB",
+    "repair_text": true,
+    "train_sessions": 15882,
+    "challenge_test_sessions": 1819,
+    "catalog_jobs": 21917,
+    "catalog_missing_title_and_summary": 3,
+    "train_sequence_length": {
+        "count": 15882,
+        "min": 4,
+        "max": 16,
+        "avg": 8.53979347689208
+    },
+    "challenge_test_history_length": {
+        "count": 1819,
+        "min": 3,
+        "max": 15,
+        "avg": 7.611874656404618
+    },
+    "output_dir": "D:\\GENAI\\K2\\DA2\\challenges_data\\GAMER\\data\\JobChallengeMB"
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "GAMER Challenge Eval"
+  short_description: "Evaluate JobChallenge runs correctly"
+  default_prompt: "Use $gamer-challenge-eval to evaluate JobChallenge metrics, sanity-check results, and export a submission from this repo."

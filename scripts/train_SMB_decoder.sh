@@ -8,10 +8,20 @@
 : ${epochs:=200}
 : ${port:=2314}
 : ${backbone:=TIGER}
+: ${temperature:=0.7}
+: ${omp_num_threads:=1}
+: ${debug_sync_cuda:=0}
+: ${gradient_checkpointing:=0}
+: ${deepspeed_config:=}
 
 export CUDA_VISIBLE_DEVICES=$gpu
-export CUDA_LAUNCH_BLOCKING=1
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=$omp_num_threads
+if [ $debug_sync_cuda -eq 1 ]; then
+    export CUDA_LAUNCH_BLOCKING=1
+    echo "CUDA_LAUNCH_BLOCKING enabled for synchronous CUDA debugging."
+else
+    unset CUDA_LAUNCH_BLOCKING
+fi
 
 gpu_num=$(echo $gpu | awk -F, '{print NF}')
 per_device_batch_size=$(($batch_size / $gpu_num))
@@ -131,6 +141,15 @@ echo "Extra arguments: ${extra_args_out}"
 extra_flags_out=$(echo "$extra_flags" | awk -F, '{for(i=1; i<=NF; i++) printf "--%s ", $i}')
 echo "Extra flags: ${extra_flags_out}"
 
+train_runtime_flags=""
+if [ $gradient_checkpointing -eq 1 ]; then
+    train_runtime_flags="${train_runtime_flags} --gradient_checkpointing"
+fi
+if [ "${deepspeed_config}" != "" ]; then
+    train_runtime_flags="${train_runtime_flags} --deepspeed ${deepspeed_config}"
+fi
+echo "Runtime flags: ${train_runtime_flags}"
+
 if [ $gpu_num -eq 1 ]; then
     echo "Using single GPU: ${gpu}"
     python main.py train_SMB_decoder \
@@ -144,7 +163,8 @@ if [ $gpu_num -eq 1 ]; then
         --tasks ${tasks} \
         --epochs ${epochs} \
         --index_file ${index_file} \
-        --temperature 0.7 \
+        --temperature ${temperature} \
+        ${train_runtime_flags} \
         ${extra_args_out} \
         ${extra_flags_out}
 else
@@ -160,7 +180,8 @@ else
         --tasks ${tasks} \
         --epochs ${epochs} \
         --index_file ${index_file} \
-        --temperature 0.7 \
+        --temperature ${temperature} \
+        ${train_runtime_flags} \
         ${extra_args_out} \
         ${extra_flags_out}
 fi

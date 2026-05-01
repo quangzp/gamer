@@ -134,6 +134,12 @@ class TrainSMBDecoder(MultiGPUTask):
             default=False,
             help="Find unused parameters",
         )
+        parser.add_argument(
+            "--gradient_checkpointing",
+            action="store_true",
+            default=False,
+            help="Enable gradient checkpointing to reduce activation memory.",
+        )
 
         parser.add_argument(
             "--wandb_run_name",
@@ -181,6 +187,7 @@ class TrainSMBDecoder(MultiGPUTask):
         deepspeed: str | None,
         temperature: float,
         find_unused_parameters: bool,
+        gradient_checkpointing: bool,
         wandb_run_name: str,
         debug: bool,
         *args,
@@ -263,7 +270,7 @@ class TrainSMBDecoder(MultiGPUTask):
             ), "Expected Qwen2Tokenizer for Qwen3 backbone"
         else:
             raise ValueError(f"Unsupported backbone model: {backbone}")
-        deepspeed = None
+        deepspeed = deepspeed if deepspeed not in [None, ""] else None
 
         train_data, valid_data = load_SMB_datasets(
             dataset=dataset,
@@ -436,8 +443,7 @@ class TrainSMBDecoder(MultiGPUTask):
             bf16=bf16,
             logging_steps=logging_step,
             optim=optim,
-            # Set to True if you want to use gradient checkpointing
-            gradient_checkpointing=False,
+            gradient_checkpointing=gradient_checkpointing,
             eval_strategy=save_and_eval_strategy,
             save_strategy=save_and_eval_strategy,
             eval_steps=save_and_eval_steps,

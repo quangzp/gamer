@@ -2,15 +2,23 @@
 : ${dataset:=Retail}
 : ${rq_kmeans:=0}
 : ${batch_size:=1024}
-: ${tasks=smb_explicit}
+: ${tasks:=smb_explicit}
 : ${test_task:=smb_explicit}
 : ${gpu:=0,1,2,3}
 : ${port:=2314}
 : ${backbone:=TIGER}
+: ${num_beams:=20}
+: ${omp_num_threads:=1}
+: ${debug_sync_cuda:=0}
 
 export CUDA_VISIBLE_DEVICES=$gpu
-export CUDA_LAUNCH_BLOCKING=1
-export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=$omp_num_threads
+if [ $debug_sync_cuda -eq 1 ]; then
+    export CUDA_LAUNCH_BLOCKING=1
+    echo "CUDA_LAUNCH_BLOCKING enabled for synchronous CUDA debugging."
+else
+    unset CUDA_LAUNCH_BLOCKING
+fi
 
 data_path=./data
 gpu_num=$(echo $gpu | awk -F, '{print NF}')
@@ -151,7 +159,7 @@ if [ $gpu_num -eq 1 ]; then
         --data_path ${data_path} \
         --results_file ${results_file} \
         --test_batch_size ${per_device_batch_size} \
-        --num_beams 20 \
+        --num_beams ${num_beams} \
         --index_file ${index_file} \
         --test_task ${test_task} \
         ${submission_args} \
@@ -166,7 +174,7 @@ else
         --data_path ${data_path} \
         --results_file ${results_file} \
         --test_batch_size ${per_device_batch_size} \
-        --num_beams 20 \
+        --num_beams ${num_beams} \
         --index_file ${index_file} \
         --test_task ${test_task} \
         ${submission_args} \
