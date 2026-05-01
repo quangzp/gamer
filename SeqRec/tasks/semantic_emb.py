@@ -198,7 +198,7 @@ class SemanticEmbedding(Task):
             return self.kuairec_text()
         elif self.dataset in ["Tmall", "Tmall-24-0.25"]:
             return self.Tmall_text()
-        elif self.dataset in ["JobChallenge", "JobChallenge_test"]:
+        elif self.dataset in ["JobChallenge", "JobChallenge_test", "JobChallengeMB"]:
             return self.french_job_text()
         else:
             raise ValueError(f"Unsupported dataset: {self.dataset}.")
