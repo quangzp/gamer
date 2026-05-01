@@ -216,7 +216,7 @@ class SemanticEmbedding(Task):
 
         model_name = self.plm_name.lower()
         checkpoint_name = self.plm_checkpoint.lower()
-        if any(keyword in model_name or keyword in checkpoint_name for keyword in ["t5", "embedding", "e5"]):  # T5/E5 or embedding models
+        if any(keyword in model_name or keyword in checkpoint_name for keyword in ["t5", "embedding", "e5", "bge"]):  # T5/E5/BGE or embedding models
             # Use SentenceTransformer for sentence embeddings
             from sentence_transformers import SentenceTransformer
             self.model = SentenceTransformer(self.plm_checkpoint, device=self.device)
