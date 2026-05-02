@@ -241,7 +241,8 @@ class TestMBDecoder(MultiGPUTask):
                     input_ids=inputs.input_ids,
                     attention_mask=inputs.attention_mask,
                     actions=inputs.actions,
-                    max_new_tokens=self.sole_item_len,
+                    # max_new_tokens=self.sole_item_len,
+                    max_new_tokens=max_new_tokens,
                     prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
                     num_beams=num_beams,
                     num_return_sequences=num_beams,
@@ -271,7 +272,8 @@ class TestMBDecoder(MultiGPUTask):
             scores = output.sequences_scores
 
             if self.backbone in ['Qwen3', 'Qwen3Multi']:
-                output_ids = output_ids[:, -self.item_len:]
+                # output_ids = output_ids[:, -self.item_len:]
+                output_ids = output_ids[:, -max_new_tokens:]
 
             output_str = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
 
